@@ -1,26 +1,43 @@
-#! /usr/bin/env python
-# load & save VLC state
-
 import dbus, sys, functools, pickle, os, os.path, subprocess, time
 
 from PyQt4.QtCore import *
 from PyQt4.QtGui import *
-import dbus.mainloop.qt
+from dbus.mainloop.qt import DBusQtMainLoop
+from dbus.mainloop.glib import DBusGMainLoop
+from multiprocessing import Process, Queue
+#from copy import deepcopy
 
-class VlcFinder (object):
-	def __init__ (self, app, action='save_state'):
+class VLCFinder():
+	"""
+	helper for findVLCs function
+	do not use directly
+	"""
+	def __init__ (self, app, queue=None):
 
 		self.outstanding = 0
 		self.app = app # QApplication instance or glib mainloop instance
 		#both support a "quit" method that can be used to kill the app
+		self.queue = queue
 
-		self.bus = dbus.SessionBus ()
+		DBusQtMainLoop (set_as_default = True)
+		self.bus = dbus.SessionBus()
 		self.vlc_names = []
 
-		if action == 'load_state':
-			self.pre_load()
-		elif action == 'save_state':
-			self.pre_save()
+		dbus_proxy = self.bus.get_object ("org.freedesktop.DBus", "/org/freedesktop/DBus")
+		for name in dbus_proxy.ListNames ():
+			if name.startswith (":"):
+				try:
+					proxy = self.bus.get_object (name, "/")
+					iface = dbus.Interface (proxy, "org.freedesktop.MediaPlayer")
+				except:
+					pass
+
+				iface.Identity (reply_handler = functools.partial (self.reply_cb, name), error_handler = functools.partial (self.error_cb, name))
+				self.outstanding += 1
+
+		self.time = QTimer()
+		
+		self.time.singleShot(1000, self.timeout)
 
 	def reply_cb (self, name, ver):
 		#print name
@@ -32,29 +49,67 @@ class VlcFinder (object):
 		self.received_result ()
 
 	def received_result (self):
-		pass
+		if ( self.outstanding == 0):
+			#print ('got them all')
+			self.app.quit()
 
-	def pre_save(self):
-		dbus_proxy = self.bus.get_object ("org.freedesktop.DBus", "/org/freedesktop/DBus")
-		for name in dbus_proxy.ListNames ():
-			if name.startswith (":"):
-				try:
-					proxy = self.bus.get_object (name, "/")
-					iface = dbus.Interface (proxy, "org.freedesktop.MediaPlayer")
-				except:
-					pass
-				iface.Identity (reply_handler = functools.partial (self.reply_cb, name), error_handler = functools.partial (self.error_cb, name))
+	def timeout(self):
+		#print ('timeout')
+		#print self.vlc_names
+		if self.queue is not None:
+			self.queue.put(self.vlc_names)
+		self.app.quit()
 
-				self.outstanding += 1
+def findVLCs():
+	"""
+	@return array of dbus vlc names (use get_object to get the actual dbus object)
+	"""
+	queue = Queue()
+	proc = Process(target=findVLCs_helper,args=(queue,))
+	proc.start()
+	vlc_names = queue.get()
+	proc.join()
+	return vlc_names
 
-		self.time = QTimer()
-		
-		self.time.singleShot(1000, self.save_state)
+def findVLCs_helper(queue):
+	"""
+	helper for findVLCs do not call directly
+	"""
+	app = QApplication(sys.argv)
+	finder = VLCFinder (app,queue)
+	sys.exit(app.exec_())
 
-	def save_state(self):
-		state_file = open(os.path.join(os.environ['HOME'],'.vlc_state'),"w")
+def createVLC():
+	#print 'create VLC called'
+	old_names = findVLCs()
+	#print 'found VLCs'
+	vlc_proc = subprocess.Popen(['/usr/bin/env', 'vlc'], stdin=subprocess.PIPE,stderr=subprocess.STDOUT)
+	#print 'VLC open'
+	time.sleep(.5)
+	#print 'waiting complete'
+	new_names = findVLCs()
+	return list(set(new_names) - set(old_names))[0]
+
+class VLCStateSave():
+	"""
+	use findVLCs & createVLCs + dbus interface to save vlc state to a file & reopen it
+	"""
+	def __init__(self,bus=None):
+		self.state_filename = os.path.join(os.environ['HOME'],'.vlc_state')
+		DBusGMainLoop(set_as_default=True)
+		self.bus = dbus.SessionBus()
+
+	def save_state(self, and_quit=False):
+		vlc_names = findVLCs()
+		if len(vlc_names) == 0:
+			# if vlc is not running, don't save state, to avoid cronjobs overwriting state
+			return
+
+		vlc_names = sorted(vlc_names)
+		#print vlc_names
+		state_file = open(self.state_filename,"w")
 		vlc_data = []
-		for  name in self.vlc_names:
+		for  name in vlc_names:
 			vlc_app = dbus.Interface(self.bus.get_object(name, '/'), 'org.freedesktop.MediaPlayer')
 			player = dbus.Interface(self.bus.get_object(name, '/Player'), 'org.freedesktop.MediaPlayer')
 			tracklist = dbus.Interface(self.bus.get_object(name, '/TrackList'), 'org.freedesktop.MediaPlayer')
@@ -75,73 +130,83 @@ class VlcFinder (object):
 				'current_pos': current_pos,
 				'tracks': tracks,
 			})
-			vlc_app.Quit()
+			if and_quit: vlc_app.Quit()
 
 		pickle.dump(vlc_data,state_file)
-		#self.app.quit ()
-		sys.exit(0)
+		state_file.close()
 
-	def pre_load(self):
-		state_file = open(os.path.join(os.environ['HOME'],'.vlc_state'),"r")
-		self.state_info = pickle.load(state_file)
-		vlc_procs = []
+	def list_state(self):
+		state_file = open(self.state_filename,"r")
+		state_info = pickle.load(state_file)
+		state_file.close()
+		#print state_info
+		for instance_num, vlc_instance_data in enumerate(state_info):
+			print('## VLC Instance ' + str(instance_num+1)+' ##')
+			print('Current Volume: ' + str(vlc_instance_data['current_vol']))
+			print('Current Position: ' + str(vlc_instance_data['current_pos']))
+			print('Tracklist:')
+			for track_num, track_path in enumerate(vlc_instance_data['tracks']):
+				if track_num == vlc_instance_data['current_track']:
+					to_print = '* '
+				else:
+					to_print='- '
+				to_print+=track_path
+				print (to_print)
 
-		for vlc_data in self.state_info:
-			vlc_proc = subprocess.Popen(['/usr/bin/env', 'vlc','--extraintf','oldrc'], stdin=subprocess.PIPE,stderr=subprocess.STDOUT)
-			vlc_procs.append(vlc_proc)
-			for track in vlc_data['tracks']:
-				vlc_proc.stdin.write('enqueue ' + track + '\n');
-			time.sleep(1) # give it time for the procs to open
-			vlc_proc.stdin.write('volume ' + str(vlc_data['current_vol']*4) + '\n')
-			#mpris/dbus format for volume is 0-100 where 0 = 0% and 100=400%
-			#rc/command line format is 0-400 where 0 is 0% and 400 is 400%
+			print('')
+			print('')
 
-			time.sleep(1) # give it time for the procs to open
-			vlc_proc.stdin.write('goto ' + str(vlc_data['current_track']) + '\n')
-			time.sleep(1) # give it time for the procs to open
-			vlc_proc.stdin.write('seek ' + str(vlc_data['current_pos']/1000) + '\n')
-			time.sleep(1) # give it time for the procs to open
-			vlc_proc.stdin.write('pause\n')
-		for vlc_proc in vlc_procs:
-			retcode = vlc_proc.wait()
-			#print 'VLC QUIT return code: ', retcode
-		#print 'ALL VLCs quit'
+	def load_state(self):
+		state_file = open(self.state_filename,"r")
+		state_info = pickle.load(state_file)
+		state_file.close()
+		for instance_num, vlc_instance_data in enumerate(state_info):
+			vlc_name = createVLC()
 
-		#self.app.quit()
-		#print 'for some reason I\'m still running'
-		sys.exit(0)
+			#vlc_app = dbus.Interface(self.bus.get_object(vlc_name, '/'), 'org.freedesktop.MediaPlayer')
+			player = dbus.Interface(self.bus.get_object(vlc_name, '/Player'), 'org.freedesktop.MediaPlayer')
+			tracklist = dbus.Interface(self.bus.get_object(vlc_name, '/TrackList'), 'org.freedesktop.MediaPlayer')
 
+			for path in vlc_instance_data['tracks']:
+				print 'adding' + path
+				tracklist.AddTrack(path, False)
 
-	#def load_state(self):
-		#for name, vlc_data in zip(self.vlc_names, self.state_info):
-			vlc_app = dbus.Interface(self.bus.get_object(name, '/'), 'org.freedesktop.MediaPlayer')
-			player = dbus.Interface(self.bus.get_object(name, '/Player'), 'org.freedesktop.MediaPlayer')
-			tracklist = dbus.Interface(self.bus.get_object(name, '/TrackList'), 'org.freedesktop.MediaPlayer')
-			#tracks = vlc_data['tracks']
-			#print vlc_data
+			player.VolumeSet(0)
+			time.sleep(0.1)
+			player.Play()
+			time.sleep(0.1)
+			player.Pause()
+			time.sleep(0.1)
 
-			#current_track = vlc_data['current_track']
-			#current_pos = vlc_data['current_pos']
-			#current_vol = vlc_data['current_vol']
-			
-
-			#for path in vlc_data['tracks']:
-				#print path
-				#tracklist.AddTrack(path, False)
-
-			#for track in range(0, current_track + 1):
-				#player.Next()
-
-			#TODO disable auto-tabbing for vlc
-			#player.VolumeSet(0)
-			#player.Play()
-			#player.Pause()
-			#player.VolumeSet(current_vol)
-			#player.PositionSet(current_pos)
-			#TODO enable auto-tabbing for vlc
-			#TODO tab all VLC windows together
-
-		#self.app.quit ()
-	
+			for track in range(0, vlc_instance_data['current_track']):
+				#print tracklist.GetCurrentTrack()
+				player.Next()
+				time.sleep(0.1)
+				#print tracklist.GetCurrentTrack()
+				#print '--'
+				player.Pause()
+				time.sleep(0.1)
+				time.sleep(0.1)
+			player.Pause()
 
 
+			player.VolumeSet(vlc_instance_data['current_vol'])
+			time.sleep(0.1)
+			player.PositionSet(vlc_instance_data['current_pos'])
+			player.Pause()
+
+
+if __name__ == "__main__":
+	state_saver = VLCStateSave()
+	if sys.argv[1] == 'save':
+		state_saver.save_state()
+	elif sys.argv[1] == 'save_and_quit':
+		state_saver.save_state(and_quit=True)
+	elif sys.argv[1] == 'load':
+		state_saver.load_state()
+	else:
+		print 'Usage: ' + sys.argv[0] + ' <save|save_and_quit|load>'
+		print 'save: save state to a file'
+		print 'save_and_quit: save vlc state to file and quit open instances of vlc after saving'
+		print 'load: state from file (creating new vlc instances)'
+	sys.exit(0)
