@@ -204,9 +204,12 @@ if __name__ == "__main__":
 		state_saver.save_state(and_quit=True)
 	elif sys.argv[1] == 'load':
 		state_saver.load_state()
+	elif sys.argv[1] == 'list':
+		state_saver.list_state()
 	else:
-		print 'Usage: ' + sys.argv[0] + ' <save|save_and_quit|load>'
+		print 'Usage: ' + sys.argv[0] + ' <save|save_and_quit|load|list>'
 		print 'save: save state to a file'
 		print 'save_and_quit: save vlc state to file and quit open instances of vlc after saving'
 		print 'load: state from file (creating new vlc instances)'
+		print 'list: list contents of the state file'
 	sys.exit(0)
