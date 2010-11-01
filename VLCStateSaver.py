@@ -1,30 +1,33 @@
 import dbus, sys, functools, pickle, os, os.path, subprocess, time
 
-from PyQt4.QtCore import *
-from PyQt4.QtGui import *
-from dbus.mainloop.qt import DBusQtMainLoop
+import gobject
 from dbus.mainloop.glib import DBusGMainLoop
-from multiprocessing import Process, Queue
-#from copy import deepcopy
+from threading import Thread, Lock
 
-class VLCFinder():
+class VLCFinder(Thread):
 	"""
 	helper for findVLCs function
 	do not use directly
 	"""
-	def __init__ (self, app, queue=None):
-
+	def __init__ (self,*args,**kwargs):
 		self.outstanding = 0
-		self.app = app # QApplication instance or glib mainloop instance
-		#both support a "quit" method that can be used to kill the app
-		self.queue = queue
+		self.loop = None
+		self.bus = None
+		self.vlc_names = []
 
-		DBusQtMainLoop (set_as_default = True)
-		self.bus = dbus.SessionBus()
+		Thread.__init__(self,*args,**kwargs)
+
+	def run(self):
+		gobject.threads_init()
+
+
+		DBusGMainLoop (set_as_default = True)
+		self.loop = gobject.MainLoop()
+		self.bus = dbus.SessionBus(self.loop)
 		self.vlc_names = []
 
 		dbus_proxy = self.bus.get_object ("org.freedesktop.DBus", "/org/freedesktop/DBus")
-		for name in dbus_proxy.ListNames ():
+		for name in dbus_proxy.ListNames():
 			if name.startswith (":"):
 				try:
 					proxy = self.bus.get_object (name, "/")
@@ -32,15 +35,15 @@ class VLCFinder():
 				except:
 					pass
 
-				iface.Identity (reply_handler = functools.partial (self.reply_cb, name), error_handler = functools.partial (self.error_cb, name))
-				self.outstanding += 1
+				try:
+					iface.Identity (reply_handler = functools.partial (self.reply_cb, name), error_handler = functools.partial (self.error_cb, name))
+					self.outstanding += 1
+				except:
+					pass
 
-		self.time = QTimer()
-		
-		self.time.singleShot(1000, self.timeout)
+		self.loop.run()
 
 	def reply_cb (self, name, ver):
-		#print name
 		if ver.startswith('vlc '):
 			self.vlc_names.append(str(name))
 		self.received_result ()
@@ -50,43 +53,23 @@ class VLCFinder():
 
 	def received_result (self):
 		if ( self.outstanding == 0):
-			#print ('got them all')
-			self.app.quit()
-
-	def timeout(self):
-		#print ('timeout')
-		#print self.vlc_names
-		if self.queue is not None:
-			self.queue.put(self.vlc_names)
-		self.app.quit()
+			self.loop.quit()
 
 def findVLCs():
 	"""
 	@return array of dbus vlc names (use get_object to get the actual dbus object)
 	"""
-	queue = Queue()
-	proc = Process(target=findVLCs_helper,args=(queue,))
-	proc.start()
-	vlc_names = queue.get()
-	proc.join()
-	return vlc_names
-
-def findVLCs_helper(queue):
-	"""
-	helper for findVLCs do not call directly
-	"""
-	app = QApplication(sys.argv)
-	finder = VLCFinder (app,queue)
-	sys.exit(app.exec_())
+	finder_thread = VLCFinder()
+	finder_thread.start()
+	finder_thread.join(1) #timeout
+	finder_thread.loop.quit() #kill the mainloop
+	return finder_thread.vlc_names
 
 def createVLC():
-	#print 'create VLC called'
 	old_names = findVLCs()
-	#print 'found VLCs'
-	vlc_proc = subprocess.Popen(['/usr/bin/env', 'vlc'], stdin=subprocess.PIPE,stderr=subprocess.STDOUT)
-	#print 'VLC open'
-	time.sleep(.5)
-	#print 'waiting complete'
+	vlc_proc = subprocess.Popen(['/usr/bin/env', 'vlc'], stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+	line = vlc_proc.stdout.readline();
+	time.sleep(0.5)
 	new_names = findVLCs()
 	return list(set(new_names) - set(old_names))[0]
 
@@ -145,6 +128,7 @@ class VLCStateSave():
 			print('Current Volume: ' + str(vlc_instance_data['current_vol']))
 			print('Current Position: ' + str(vlc_instance_data['current_pos']))
 			print('Tracklist:')
+			print('* = current track')
 			for track_num, track_path in enumerate(vlc_instance_data['tracks']):
 				if track_num == vlc_instance_data['current_track']:
 					to_print = '* '
@@ -168,7 +152,6 @@ class VLCStateSave():
 			tracklist = dbus.Interface(self.bus.get_object(vlc_name, '/TrackList'), 'org.freedesktop.MediaPlayer')
 
 			for path in vlc_instance_data['tracks']:
-				print 'adding' + path
 				tracklist.AddTrack(path, False)
 
 			player.VolumeSet(0)
@@ -179,11 +162,8 @@ class VLCStateSave():
 			time.sleep(0.1)
 
 			for track in range(0, vlc_instance_data['current_track']):
-				#print tracklist.GetCurrentTrack()
 				player.Next()
 				time.sleep(0.1)
-				#print tracklist.GetCurrentTrack()
-				#print '--'
 				player.Pause()
 				time.sleep(0.1)
 				time.sleep(0.1)
