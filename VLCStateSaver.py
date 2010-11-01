@@ -58,6 +58,12 @@ class VLCFinder(Thread):
 def findVLCs():
 	"""
 	@return array of dbus vlc names (use get_object to get the actual dbus object)
+
+	Problem: there's no way to easily get all dbus instances of one type (say org.mpris.vlc)
+	the only way to get all VLCs is to loop through all the names, call Identity() and see what it returns.
+	That's all fine and good except a lot of processes flake out and don't respond causing costly timeout
+
+	Solution: send all Identity() requests in parallel with the dbus asynchronous API, then use the python threading api to create a timeout
 	"""
 	finder_thread = VLCFinder()
 	finder_thread.start()
@@ -66,12 +72,31 @@ def findVLCs():
 	return finder_thread.vlc_names
 
 def createVLC():
+	"""
+	create an instance of VLC with dbus enabled and return that VLC's dbus instance
+	"""
 	old_names = findVLCs()
-	vlc_proc = subprocess.Popen(['/usr/bin/env', 'vlc'], stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
-	line = vlc_proc.stdout.readline();
-	time.sleep(0.5)
+	vlc_proc = subprocess.Popen(['vlc','--extraintf','dbus'], shell=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+
+	#wait for VLC to start
+	line = vlc_proc.stdout.readline(); #first line will be a Version line
+	#getting this far gurantees VLC has started, but not that all it's modules have been initiliaed
+	time.sleep(0.5) #wait a little longer for the dbus module to initialize, don't know a better way to do this
+	#I've tried -vv & --versbose and waiting for the line to print that says dbus has been initialized, but that doesn't seem to work for somer reason
+
+	#find the new dbus instance by comparing new names to old names
 	new_names = findVLCs()
-	return list(set(new_names) - set(old_names))[0]
+	difference = list(set(new_names) - set(old_names))
+	len_diff = len(difference)
+
+	if len_diff > 1:
+		print "I'm confused, stop opening extra VLCs, i'm working here!"
+		sys.exit(1)
+	elif len_diff < 1:
+		print "VLC instance not created successfully"
+		sys.exit(1)
+
+	return difference[0]
 
 class VLCStateSave():
 	"""
@@ -141,13 +166,15 @@ class VLCStateSave():
 			print('')
 
 	def load_state(self):
+		"""
+		create a VLC instance, then use the dbus interface for that instance to load the playlist and other info into that instance from the statefile
+		"""
 		state_file = open(self.state_filename,"r")
 		state_info = pickle.load(state_file)
 		state_file.close()
 		for instance_num, vlc_instance_data in enumerate(state_info):
 			vlc_name = createVLC()
 
-			#vlc_app = dbus.Interface(self.bus.get_object(vlc_name, '/'), 'org.freedesktop.MediaPlayer')
 			player = dbus.Interface(self.bus.get_object(vlc_name, '/Player'), 'org.freedesktop.MediaPlayer')
 			tracklist = dbus.Interface(self.bus.get_object(vlc_name, '/TrackList'), 'org.freedesktop.MediaPlayer')
 
@@ -168,7 +195,6 @@ class VLCStateSave():
 				time.sleep(0.1)
 				time.sleep(0.1)
 			player.Pause()
-
 
 			player.VolumeSet(vlc_instance_data['current_vol'])
 			time.sleep(0.1)
