@@ -1,8 +1,17 @@
-import dbus, sys, functools, pickle, os, os.path, subprocess, time
+# coding=utf-8
+import dbus, sys, functools, pickle, os, os.path, subprocess, time, datetime, urllib
 
 import gobject
 from dbus.mainloop.glib import DBusGMainLoop
 from threading import Thread, Lock
+
+class FormattableTimeDelta(datetime.timedelta):
+	def __format__(self, format_str):
+		hours, remainder = divmod(duration_time_delta, 3600)
+		minutes, seconds = divmod(remainder, 60)
+
+		duration_formatted = '%s:%s:%s' % (hours, minutes, seconds)
+		return
 
 class VLCFinder(Thread):
 	"""
@@ -75,26 +84,33 @@ def createVLC():
 	"""
 	create an instance of VLC with dbus enabled and return that VLC's dbus instance
 	"""
-	old_names = findVLCs()
+	old_names = set(findVLCs())
 	vlc_proc = subprocess.Popen(['vlc','--extraintf','dbus'], shell=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+	tries=0
+	max_tries=10 #maximum number of seconds to wait
 
 	#wait for VLC to start
 	line = vlc_proc.stdout.readline(); #first line will be a Version line
 	#getting this far gurantees VLC has started, but not that all it's modules have been initiliaed
-	time.sleep(0.5) #wait a little longer for the dbus module to initialize, don't know a better way to do this
-	#I've tried -vv & --versbose and waiting for the line to print that says dbus has been initialized, but that doesn't seem to work for somer reason
+	while True:
+		time.sleep(0.5) #wait a little longer for the dbus module to initialize, don't know a better way to do this
+		#I've tried -vv & --versbose and waiting for the line to print that says dbus has been initialized, but that doesn't seem to work for somer reason
+		#find the new dbus instance by comparing new names to old names
 
-	#find the new dbus instance by comparing new names to old names
-	new_names = findVLCs()
-	difference = list(set(new_names) - set(old_names))
-	len_diff = len(difference)
+		new_names = set(findVLCs())
+		difference = list(new_names - old_names)
+		len_diff = len(difference)
 
-	if len_diff > 1:
-		print "I'm confused, stop opening extra VLCs, i'm working here!"
-		sys.exit(1)
-	elif len_diff < 1:
-		print "VLC instance not created successfully"
-		sys.exit(1)
+		if len_diff > 1:
+			print >>sys.stderr,"I'm confused, stop opening extra VLCs, i'm working here!"
+			sys.exit(1)
+		elif len_diff < 1 and tries < max_tries:
+			tries += 1 #try again
+		elif len_diff < 1:
+			print >>sys.stderr, "VLC instance not created successfully"
+			sys.exit(1)
+		else:
+			break
 
 	return difference[0]
 
@@ -149,18 +165,26 @@ class VLCStateSave():
 		state_file.close()
 		#print state_info
 		for instance_num, vlc_instance_data in enumerate(state_info):
-			print('## VLC Instance ' + str(instance_num+1)+' ##')
-			print('Current Volume: ' + str(vlc_instance_data['current_vol']))
-			print('Current Position: ' + str(vlc_instance_data['current_pos']))
-			print('Tracklist:')
-			print('* = current track')
-			for track_num, track_path in enumerate(vlc_instance_data['tracks']):
+			s = \
+			u'## VLC Instance {instance_num} ##\n'\
+			u'Current Volume: {current_vol} \n'\
+			u'Current Position: {current_pos}µs ({current_pos_td})\n'\
+			u'Tracklist:\n'\
+			u'* = current track'
+
+			vlc_instance_data['instance_num'] = instance_num + 1
+			vlc_instance_data['current_pos_td'] = datetime.timedelta(milliseconds=vlc_instance_data['current_pos'])
+
+			print(s.format(**vlc_instance_data))
+
+			for track_num, track_url in enumerate(vlc_instance_data['tracks']):
 				if track_num == vlc_instance_data['current_track']:
-					to_print = '* '
+					cur_ind = '* '
 				else:
-					to_print='- '
-				to_print+=track_path
-				print (to_print)
+					cur_ind ='- '
+				track_path = urllib.url2pathname(track_url)
+				
+				print (cur_ind + track_path)
 
 			print('')
 			print('')
