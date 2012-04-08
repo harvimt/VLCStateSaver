@@ -94,7 +94,7 @@ def createVLC():
 	"""
 	old_names = set(findVLCs())
 	
-	print 'creating vlc process'
+	print('creating vlc process')
 	#vlc_proc = subprocess.Popen(['vlc','--extraintf','dbus'], stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
 	#if vlc gets is configured to open dbus, and gets passed --extraintf dbus, it'll create 2 dbus interfaces.
 	#yeah coz that makes sense, but that's what it does.
@@ -241,20 +241,32 @@ class VLCStateSave():
 			tracklist = dbus.Interface(self.bus.get_object(vlc_name, '/org/mpris/MediaPlayer2'), 'org.mpris.MediaPlayer2.TrackList')
 			props =     dbus.Interface(self.bus.get_object(vlc_name, '/org/mpris/MediaPlayer2'), dbus.PROPERTIES_IFACE)
 
-			for uri in reversed(vlc_instance_data['tracks']):
-				#print 'trying to add uri: %s' % uri
-				#path = url2pathname(uri)
-				#print 'as file path: %s' % uri
-				tracklist.AddTrack( urllib.unquote(urlparse.urlparse(uri)).path, '', False)
+			for uri in vlc_instance_data['tracks']:
+				print 'trying to add uri: %s' % uri
+				#path = url2pathname(urlparse.urlparse(uri).path)
+				#print 'as file path: %s' % path
+				#tracklist.AddTrack( urllib.unquote(urlparse.urlparse(uri)).path, '', False)
+				#tracklist.AddTrack( uri, '', False)
+				player.OpenUri(uri)
+				time.sleep(.1)
+				player.Pause()
+				time.sleep(.1)
 
 			time.sleep(0.1) #FIXME catch signal instead of sleeping
-			props.Set('org.mpris.MediaPlayer2', 'Volume', vlc_instance_data['current_vol'])
-			track_ids = props.Get('org.mpris.MediaPlayer2', 'Tracks')
+			#props.Set('org.mpris.MediaPlayer2', 'Volume', str(vlc_instance_data['current_vol']))
+			track_ids = props.Get('org.mpris.MediaPlayer2.TrackList', 'Tracks')
 			player.SetPosition(track_ids[vlc_instance_data['current_track']], vlc_instance_data['current_pos'])
 
 if __name__ == "__main__":
 	state_saver = VLCStateSave()
-	if sys.argv[1] == 'save':
+
+	if len(sys.argv) == 1:
+		print 'Usage: ' + os.path.basename(sys.argv[0]) + ' <save|save_and_quit|load|list>'
+		print 'save: save state to a file'
+		print 'save_and_quit: save vlc state to file and quit open instances of vlc after saving'
+		print 'load: state from file (creating new vlc instances)'
+		print 'list: list contents of the state file'
+	elif sys.argv[1] == 'save':
 		state_saver.save_state()
 	elif sys.argv[1] == 'save_and_quit':
 		state_saver.save_state(and_quit=True)
@@ -263,9 +275,11 @@ if __name__ == "__main__":
 	elif sys.argv[1] == 'list':
 		state_saver.list_state()
 	else:
-		print 'Usage: ' + sys.argv[0] + ' <save|save_and_quit|load|list>'
-		print 'save: save state to a file'
-		print 'save_and_quit: save vlc state to file and quit open instances of vlc after saving'
-		print 'load: state from file (creating new vlc instances)'
-		print 'list: list contents of the state file'
-	sys.exit(0)
+		print('wat')
+
+def repl(name):
+	global vlc_app, player, tracklist, props, state_saver
+	vlc_app =   dbus.Interface(state_saver.bus.get_object(name, '/org/mpris/MediaPlayer2'), 'org.mpris.MediaPlayer2')
+	player =    dbus.Interface(state_saver.bus.get_object(name, '/org/mpris/MediaPlayer2'), 'org.mpris.MediaPlayer2.Player')
+	tracklist = dbus.Interface(state_saver.bus.get_object(name, '/org/mpris/MediaPlayer2'), 'org.mpris.MediaPlayer2.TrackList')
+	props =     dbus.Interface(state_saver.bus.get_object(name, '/org/mpris/MediaPlayer2'), dbus.PROPERTIES_IFACE)
