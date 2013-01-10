@@ -1,140 +1,71 @@
-# coding=utf-8
-import dbus, sys, functools, pickle, os, os.path, subprocess, time, datetime, urllib, urlparse
-from urllib import url2pathname, pathname2url
+#!/usr/bin/env python2
+# -*- coding=utf-8 -*- #
+from __future__ import unicode_literals, print_function
 
+"""
+Copyright © 2012, Mark Harviston <mark.harviston@gmail.com>
+This is free software, most forms of redistribution and derivitive works are permitted with the following restrictions.
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+"""
+import dbus, sys, pickle, os, os.path, subprocess, time, datetime
 import gobject
 from dbus.mainloop.glib import DBusGMainLoop
-from threading import Thread, Lock
+import urlparse, urllib
 import logging
+#silence obnoxious error-logging
+#possibly not necessary anymore since there should be much fewer errors
+
 dbus_logger = logging.getLogger('dbus.proxies')
 dbus_logger.setLevel(logging.CRITICAL)
 
 class FormattableTimeDelta(datetime.timedelta):
 	def __format__(self, format_str):
-		hours, remainder = divmod(duration_time_delta, 3600)
+		hours, remainder = divmod(self.duration_time_delta, 3600)
 		minutes, seconds = divmod(remainder, 60)
 
 		duration_formatted = '%s:%s:%s' % (hours, minutes, seconds)
-		return
+		return duration_formatted
 
-class VLCFinder(Thread):
-	"""
-	helper for findVLCs function
-	do not use directly
-	"""
-	def __init__ (self,*args,**kwargs):
-		self.outstanding = 0
-		self.loop = None
-		self.bus = None
-		self.vlc_names = []
+DBusGMainLoop(set_as_default=True)
+loop = gobject.MainLoop()
+bus = dbus.SessionBus(loop)
 
-		Thread.__init__(self,*args,**kwargs)
-
-	def run(self):
-		gobject.threads_init()
-
-		DBusGMainLoop (set_as_default = True)
-		self.loop = gobject.MainLoop()
-		self.bus = dbus.SessionBus(self.loop)
-		self.vlc_names = []
-
-		dbus_proxy = self.bus.get_object ("org.freedesktop.DBus", "/org/freedesktop/DBus")
-		for name in dbus_proxy.ListNames():
-			if not name.startswith(':'): continue
-			#print 'trying %s' % name
-			try:
-				proxy = self.bus.get_object (name, "/org/mpris/MediaPlayer2")
-				iface = dbus.Interface (proxy, dbus.PROPERTIES_IFACE)
-			except:
-				pass
-
-			try:
-				iface.Get ('org.mpris.MediaPlayer2', 'Identity',
-						reply_handler = functools.partial (self.reply_cb, name),
-						error_handler = functools.partial (self.error_cb, name))
-				self.outstanding += 1
-			except:
-				pass
-
-		self.loop.run()
-
-	def reply_cb (self, name, ver):
-		#print('returned %s' % name)
-		if ver.lower().startswith('vlc '):
-			print('found vlc, %s' % name)
-			self.vlc_names.append(str(name))
-		self.received_result ()
-
-	def error_cb (self, name, msg):
-		self.received_result ()
-
-	def received_result (self):
-		if ( self.outstanding == 0):
-			self.loop.quit()
+vlc_prefix = 'org.mpris.MediaPlayer2.vlc-' #vlc bus names should start with this
+#not the "default" vlc instance will have the name org.mpris.MediaPlayer2.vlc, as well as org.mpris.MediaPlayer2.vlc-<pid>
 
 def findVLCs():
+	global bus
 	"""
-	@return array of dbus vlc names (use get_object to get the actual dbus object)
-
-	Problem: there's no way to easily get all dbus instances of one type (say org.mpris.vlc)
-	the only way to get all VLCs is to loop through all the names, call Identity() and see what it returns.
-	That's all fine and good except a lot of processes flake out and don't respond causing costly timeout
-
-	Solution: send all Identity() requests in parallel with the dbus asynchronous API, then use the python threading api to create a timeout
+	return array of dbus vlc names (use get_object to get the actual dbus object)
 	"""
-	finder_thread = VLCFinder()
-	finder_thread.start()
-	finder_thread.join(1) #timeout
-	finder_thread.loop.quit() #kill the mainloop
-	return finder_thread.vlc_names
+
+	dbus_proxy = bus.get_object ("org.freedesktop.DBus", "/org/freedesktop/DBus")
+
+	return [name for name in dbus_proxy.ListNames() if name.startswith(vlc_prefix)]
 
 def createVLC():
 	"""
 	create an instance of VLC with dbus enabled and return that VLC's dbus instance
 	"""
-	old_names = set(findVLCs())
-	
 	print('creating vlc process')
-	#vlc_proc = subprocess.Popen(['vlc','--extraintf','dbus'], stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
-	#if vlc gets is configured to open dbus, and gets passed --extraintf dbus, it'll create 2 dbus interfaces.
-	#yeah coz that makes sense, but that's what it does.
 
-	vlc_proc = subprocess.Popen(['vlc'], stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
-	print 'vlc proccess created'
-	tries=0
-	max_tries=10 #maximum number of seconds to wait
+	vlc_proc = subprocess.Popen(('vlc', '-vv'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+	print('vlc proccess created')
 
-	#wait for VLC to start
-	for i in range(5):
-		line = vlc_proc.stdout.readline(); #first line will be a Version line
-		print line,
-		if 'dbus interface: listening on dbus as:':
-			#it says which interface it tried to create, not what one actually got created
-			break
+	for line in vlc_proc.stdout:
+		if 'listening on dbus as: ' in line.decode('utf-8'):
+			dbus_name = line.rsplit(': ', 1)[1][:-1]
+			print('dbus name found: %s' % dbus_name)
+			return dbus_name
 
-
-	#getting this far gurantees VLC has started, but not that all it's modules have been initiliaed
-	while True:
-		time.sleep(0.5) #wait a little longer for the dbus module to initialize, don't know a better way to do this
-		#I've tried -vv & --versbose and waiting for the line to print that says dbus has been initialized, but that doesn't seem to work for somer reason
-		#find the new dbus instance by comparing new names to old names
-
-		new_names = set(findVLCs())
-		difference = list(new_names - old_names)
-		len_diff = len(difference)
-
-		if len_diff > 1:
-			print >>sys.stderr,"I'm confused, stop opening extra VLCs, i'm working here!"
-			sys.exit(1)
-		elif len_diff < 1 and tries < max_tries:
-			tries += 1 #try again
-		elif len_diff < 1:
-			print >>sys.stderr, "VLC instance not created successfully"
-			sys.exit(1)
-		else:
-			break
-
-	return difference[0]
+	#alternative solution, no gurantee that dbus has started yet though
+	#return vlc_prefix + str(vlc_proc.pid)
 
 class VLCStateSave():
 	"""
@@ -142,10 +73,18 @@ class VLCStateSave():
 	"""
 	def __init__(self,bus=None):
 		self.state_filename = os.path.join(os.environ['HOME'],'.vlc_state')
-		DBusGMainLoop(set_as_default=True)
-		self.bus = dbus.SessionBus()
 
-	def save_state(self, and_quit=False):
+	def save_state(self, and_quit=False, vlc_data=None):
+
+		if vlc_data is None:
+			vlc_data = self.get_state(and_quit)
+
+		with open(self.state_filename,"w") as state_file:
+			pickle.dump(vlc_data, state_file)
+
+	def get_state(self, and_quit=False):
+		global bus
+
 		vlc_names = findVLCs()
 		if len(vlc_names) == 0:
 			# if vlc is not running, don't save state, to avoid cronjobs overwriting state
@@ -153,18 +92,17 @@ class VLCStateSave():
 
 		vlc_names = sorted(vlc_names)
 		#print vlc_names
-		state_file = open(self.state_filename,"w")
 		vlc_data = []
 		for  name in vlc_names:
-			vlc_app =   dbus.Interface(self.bus.get_object(name, '/org/mpris/MediaPlayer2'), 'org.mpris.MediaPlayer2')
-			player =    dbus.Interface(self.bus.get_object(name, '/org/mpris/MediaPlayer2'), 'org.mpris.MediaPlayer2.Player')
-			tracklist = dbus.Interface(self.bus.get_object(name, '/org/mpris/MediaPlayer2'), 'org.mpris.MediaPlayer2.TrackList')
-			props =     dbus.Interface(self.bus.get_object(name, '/org/mpris/MediaPlayer2'), dbus.PROPERTIES_IFACE)
+			vlc_app =   dbus.Interface(bus.get_object(name, '/org/mpris/MediaPlayer2'), 'org.mpris.MediaPlayer2')
+			player =    dbus.Interface(bus.get_object(name, '/org/mpris/MediaPlayer2'), 'org.mpris.MediaPlayer2.Player')
+			tracklist = dbus.Interface(bus.get_object(name, '/org/mpris/MediaPlayer2'), 'org.mpris.MediaPlayer2.TrackList')
+			props =     dbus.Interface(bus.get_object(name, '/org/mpris/MediaPlayer2'), dbus.PROPERTIES_IFACE)
 
 			track_ids = list(props.Get('org.mpris.MediaPlayer2.TrackList', 'Tracks'))
 			tracks = tracklist.GetTracksMetadata(track_ids)
 
-			cur_trackid = props.Get('org.mpris.MediaPlayer2.Player', 'Metadata')['mpris:trackid']
+			cur_trackid = props.Get('org.mpris.MediaPlayer2.Player', 'Metadata').get('mpris:trackid', None)
 			current_pos = props.Get('org.mpris.MediaPlayer2.Player', 'Position')
 			current_vol = props.Get('org.mpris.MediaPlayer2.Player', 'Volume')
 			current_track = None
@@ -177,7 +115,7 @@ class VLCStateSave():
 					current_track = i
 
 				path = str(track[dbus.String(u'xesam:url')])
-				print 'added track %s' % path
+				print('added track %s' % path)
 				track_uris.append(path)
 
 			vlc_data.append({
@@ -186,23 +124,28 @@ class VLCStateSave():
 				'current_pos': float(current_pos),
 				'tracks': track_uris,
 			})
+
 			if and_quit: vlc_app.Quit()
 
-		pickle.dump(vlc_data,state_file)
-		state_file.close()
+		return vlc_data
 
-	def list_state(self):
-		state_file = open(self.state_filename,"r")
-		state_info = pickle.load(state_file)
-		state_file.close()
+	def list_state(self, state_info=None):
+		if state_info is None:
+			with open(self.state_filename,"r") as state_file:
+				try:
+					state_info = pickle.load(state_file)
+				except:
+					print ('Failed to load state file')
+					return
+
 		#print state_info
+		s = \
+		'## VLC Instance {instance_num} ##\n'
+		'Current Volume: {current_vol} \n'
+		'Current Position: {current_pos}µs ({current_pos_td})\n'
+		'Tracklist:\n'
+		'* = current track'
 		for instance_num, vlc_instance_data in enumerate(state_info):
-			s = \
-			u'## VLC Instance {instance_num} ##\n'\
-			u'Current Volume: {current_vol} \n'\
-			u'Current Position: {current_pos}µs ({current_pos_td})\n'\
-			u'Tracklist:\n'\
-			u'* = current track'
 
 			vlc_instance_data['instance_num'] = instance_num + 1
 			vlc_instance_data['current_pos_td'] = datetime.timedelta(milliseconds=vlc_instance_data['current_pos'])
@@ -211,61 +154,70 @@ class VLCStateSave():
 
 			for track_num, track_url in enumerate(vlc_instance_data['tracks']):
 				if track_num == vlc_instance_data['current_track']:
-					cur_ind = '* '
+					cur_ind = '*'
 				else:
-					cur_ind ='- '
-				track_path = track_url
-				#track_path = urllib.url2pathname(track_url)
-				
-				print (cur_ind + track_path)
+					cur_ind ='-'
+
+				uri_parsed = urlparse.urlparse(track_url)
+				if uri_parsed.scheme == 'file':
+					print ('%s %s' % (cur_ind, urllib.url2pathname(uri_parsed.path)))
+				else:
+					print('%s %s' % (cur_ind, track_url))
 
 			print('')
 			print('')
 
 	def load_state(self):
+		global bus
+
 		"""
 		create a VLC instance, then use the dbus interface for that instance to load the playlist and other info into that instance from the statefile
 		"""
-		state_file = open(self.state_filename,"r")
-		state_info = pickle.load(state_file)
-		state_file.close()
+		with open(self.state_filename,"r") as state_file:
+			state_info = pickle.load(state_file)
+
 		for instance_num, vlc_instance_data in enumerate(state_info):
 			vlc_name = createVLC()
-			print 'vlc created, vlc_name=%s' % vlc_name
+			print('vlc created, vlc_name=%s' % vlc_name)
 
-			#player = dbus.Interface(self.bus.get_object(vlc_name, '/Player'), 'org.freedesktop.MediaPlayer')
-			#tracklist = dbus.Interface(self.bus.get_object(vlc_name, '/TrackList'), 'org.freedesktop.MediaPlayer')
+			#player = dbus.Interface(bus.get_object(vlc_name, '/Player'), 'org.freedesktop.MediaPlayer')
+			#tracklist = dbus.Interface(bus.get_object(vlc_name, '/TrackList'), 'org.freedesktop.MediaPlayer')
+			tracklist_iface = 'org.mpris.MediaPlayer2.TrackList'
 
-			vlc_app =   dbus.Interface(self.bus.get_object(vlc_name, '/org/mpris/MediaPlayer2'), 'org.mpris.MediaPlayer2')
-			player =    dbus.Interface(self.bus.get_object(vlc_name, '/org/mpris/MediaPlayer2'), 'org.mpris.MediaPlayer2.Player')
-			tracklist = dbus.Interface(self.bus.get_object(vlc_name, '/org/mpris/MediaPlayer2'), 'org.mpris.MediaPlayer2.TrackList')
-			props =     dbus.Interface(self.bus.get_object(vlc_name, '/org/mpris/MediaPlayer2'), dbus.PROPERTIES_IFACE)
+			vlc_app =   dbus.Interface(bus.get_object(vlc_name, '/org/mpris/MediaPlayer2'), 'org.mpris.MediaPlayer2')
+			player =    dbus.Interface(bus.get_object(vlc_name, '/org/mpris/MediaPlayer2'), 'org.mpris.MediaPlayer2.Player')
+			tracklist = dbus.Interface(bus.get_object(vlc_name, '/org/mpris/MediaPlayer2'), tracklist_iface)
+			props =     dbus.Interface(bus.get_object(vlc_name, '/org/mpris/MediaPlayer2'), dbus.PROPERTIES_IFACE)
 
-			for uri in vlc_instance_data['tracks']:
-				print 'trying to add uri: %s' % uri
-				#path = url2pathname(urlparse.urlparse(uri).path)
-				#print 'as file path: %s' % path
-				#tracklist.AddTrack( urllib.unquote(urlparse.urlparse(uri)).path, '', False)
-				#tracklist.AddTrack( uri, '', False)
-				player.OpenUri(uri)
+			prev_id = '/org/mpris/MediaPlayer2/TrackList/NoTrack'
+			for i, uri in enumerate(vlc_instance_data['tracks']):
+				#print('trying to add uri: %s' % uri)
+				tracklist.AddTrack(
+					uri,
+					prev_id,
+					False)
+
+				time.sleep(.1)
+
+				prev_id = props.Get(tracklist_iface,'Tracks')[-1]
+
+				player.Pause()
+
+			if vlc_instance_data['current_track'] is not None:
+				player.SetPosition(props.Get(tracklist_iface, 'Tracks')[vlc_instance_data['current_track']], vlc_instance_data['current_pos'])
 				time.sleep(.1)
 				player.Pause()
-				time.sleep(.1)
-
-			time.sleep(0.1) #FIXME catch signal instead of sleeping
-			#props.Set('org.mpris.MediaPlayer2', 'Volume', str(vlc_instance_data['current_vol']))
-			track_ids = props.Get('org.mpris.MediaPlayer2.TrackList', 'Tracks')
-			player.SetPosition(track_ids[vlc_instance_data['current_track']], vlc_instance_data['current_pos'])
 
 if __name__ == "__main__":
 	state_saver = VLCStateSave()
 
 	if len(sys.argv) == 1:
-		print 'Usage: ' + os.path.basename(sys.argv[0]) + ' <save|save_and_quit|load|list>'
-		print 'save: save state to a file'
-		print 'save_and_quit: save vlc state to file and quit open instances of vlc after saving'
-		print 'load: state from file (creating new vlc instances)'
-		print 'list: list contents of the state file'
+		print ('Usage: ' + os.path.basename(sys.argv[0]) + ' <save|save_and_quit|load|list>')
+		print ('save: save state to a file')
+		print ('save_and_quit: save vlc state to file and quit open instances of vlc after saving')
+		print ('load: state from file (creating new vlc instances)')
+		print ('list: list contents of the state file')
+		print ('list_cur: list the current state w/o saving to file')
 	elif sys.argv[1] == 'save':
 		state_saver.save_state()
 	elif sys.argv[1] == 'save_and_quit':
@@ -274,8 +226,12 @@ if __name__ == "__main__":
 		state_saver.load_state()
 	elif sys.argv[1] == 'list':
 		state_saver.list_state()
+	elif sys.argv[1] == 'list_cur':
+		state_saver.list_state(state_saver.get_state())
 	else:
-		print('wat')
+		print('bad command line')
+		sys.exit(1)
+	sys.exit(0)
 
 def repl(name):
 	global vlc_app, player, tracklist, props, state_saver
